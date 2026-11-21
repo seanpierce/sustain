@@ -64,6 +64,7 @@ mod suggestion_entry;
 mod table_cell;
 #[cfg(test)]
 mod test_support;
+mod theme_sync;
 mod titlebar;
 mod track_context;
 mod track_context_ops;
@@ -177,6 +178,8 @@ pub fn run(
         .application_id(application_id)
         .build();
     sustain_profiler::profile_mark!(run_profile, "GTK application built");
+
+    theme_sync::install(&app);
 
     // Install the result sink before starting the async metadata writer so a
     // restored outbox row that fails on its first startup attempt is visible
