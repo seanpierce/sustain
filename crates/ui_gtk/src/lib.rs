@@ -178,7 +178,6 @@ pub fn run(
         .application_id(application_id)
         .build();
     sustain_profiler::profile_mark!(run_profile, "GTK application built");
-
     theme_sync::install(&app);
 
     // Install the result sink before starting the async metadata writer so a
