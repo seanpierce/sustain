@@ -78,8 +78,7 @@ impl ApplicationRuntime {
         policy: LibraryImportPolicy,
     ) -> ApplicationRuntimeResult<LibraryImportTask> {
         self.ensure_no_conflicting_library_mutation()?;
-        if self.settings.library.management_mode
-            == LibraryManagementMode::CopyAddedFilesIntoLibrary
+        if self.settings.library.management_mode == LibraryManagementMode::CopyAddedFilesIntoLibrary
         {
             self.ensure_managed_library_filesystem_supported()?;
         }

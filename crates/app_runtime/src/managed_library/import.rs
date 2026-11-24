@@ -179,15 +179,18 @@ impl LibraryImportContext<'_> {
             .ok_or(ApplicationRuntimeError::LibraryPathUnavailable)?
             .to_path_buf();
 
-        let preserve_internal_paths = self.policy
-            == LibraryImportPolicy::CopyExternalFiles
+        let preserve_internal_paths = self.policy == LibraryImportPolicy::CopyExternalFiles
             && self.settings.library.management_mode
                 == sustain_domain::LibraryManagementMode::ReferenceFilesInPlace;
+
+        let mut filesystem_validated = false;
 
         if !preserve_internal_paths {
             self.managed_library_filesystem_validator
                 .validate(&library_path)
                 .map_err(ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported)?;
+
+            filesystem_validated = true;
         }
 
         let DiscoveredFiles {
@@ -216,10 +219,7 @@ impl LibraryImportContext<'_> {
             .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
 
         if preserve_internal_paths {
-            let library_paths = [
-                library_path.as_path(),
-                canonical_library_path.as_path(),
-            ];
+            let library_paths = [library_path.as_path(), canonical_library_path.as_path()];
 
             let contains_external_files = files.iter().any(|file| {
                 resolve_reference_locations(file, library_paths)
@@ -229,9 +229,9 @@ impl LibraryImportContext<'_> {
             if contains_external_files {
                 self.managed_library_filesystem_validator
                     .validate(&library_path)
-                    .map_err(
-                        ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported,
-                    )?;
+                    .map_err(ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported)?;
+
+                filesystem_validated = true;
             }
 
             files.sort_by_cached_key(|file| {
@@ -322,6 +322,24 @@ impl LibraryImportContext<'_> {
                         continue;
                     }
                 }
+            }
+
+            // A file's resolved location may have changed since discovery.
+            // Never enter the managed copy pipeline without validation.
+            if !filesystem_validated {
+                if let Err(error) = self
+                    .managed_library_filesystem_validator
+                    .validate(&batch.library_path)
+                {
+                    return self.finish_failed_managed_import(
+                        &batch.library_path,
+                        total_files,
+                        state,
+                        ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported(error),
+                    );
+                }
+
+                filesystem_validated = true;
             }
 
             match batch.import_file(self.metadata_service.as_ref(), source_path) {
