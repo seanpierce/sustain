@@ -358,8 +358,21 @@ pub struct LibraryScanTask {
     cancellation_requested: Arc<AtomicBool>,
 }
 
+/// Determines how files submitted for import are brought into the library.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LibraryImportPolicy {
+    /// Follow the configured library management mode.
+    #[default]
+    FollowLibrarySettings,
+
+    /// Copy external files into the library while referencing files
+    /// already inside the library in place.
+    CopyExternalFiles,
+}
+
 pub struct LibraryImportTask {
     paths: Vec<PathBuf>,
+    policy: LibraryImportPolicy,
     settings: UserSettings,
     existing_tracks: Vec<Track>,
     library_store: Arc<dyn LibraryStore>,
@@ -416,6 +429,9 @@ pub enum ImportFailureReason {
     /// The library refused to record the file, and its copy was removed
     /// from the library folder again.
     NotRecorded,
+    /// The library refused to record an existing file referenced in place.
+    /// The original file remains untouched.
+    NotRecordedReference,
     /// The library refused to record the file, and its copy could not be
     /// removed from the library folder.
     NotRecordedCopyKept,

@@ -691,6 +691,9 @@ pub fn import_failure_reason_text(reason: ImportFailureReason) -> String {
         ImportFailureReason::NotRecorded => {
             gettext("The library could not record it, so its copy was removed.")
         }
+        ImportFailureReason::NotRecordedReference => {
+            gettext("The library could not record it. The original file was left untouched.")
+        }
         ImportFailureReason::NotRecordedCopyKept => gettext(
             "The library could not record it, and its copy could not be removed from the library folder.",
         ),

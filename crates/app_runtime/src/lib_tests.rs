@@ -1834,6 +1834,252 @@ fn managed_import_takes_no_link_named_unlike_its_target_for_the_track_already_th
 }
 
 #[test]
+fn copy_external_import_policy_rolls_back_only_copied_files() {
+    let library_root = unique_test_directory();
+    let external_root = unique_test_directory();
+
+    std::fs::create_dir_all(&library_root).expect("create library root");
+    std::fs::create_dir_all(&external_root).expect("create external root");
+
+    let inside_path = library_root.join("inside.flac");
+    let outside_path = external_root.join("outside.flac");
+
+    std::fs::write(&inside_path, b"inside audio bytes").expect("write internal source");
+    std::fs::write(&outside_path, b"outside audio bytes").expect("write external source");
+
+    let backing: Arc<dyn LibraryStore> =
+        Arc::new(SqliteLibraryStore::open_in_memory().expect("in-memory SQLite store"));
+
+    let store = Arc::new(crate::test_store::FaultyStore::new(backing));
+    store.set_fail_save_tracks(true);
+
+    let mut runtime = ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(
+        UserSettings::with_library_path(Some(library_root.clone())),
+    )))
+    .expect("load settings")
+    .with_library_services(store.clone(), Arc::new(TestMetadataService))
+    .expect("library services initialize");
+
+    let task = runtime
+        .prepare_library_import_with_policy(
+            vec![outside_path.clone(), inside_path.clone()],
+            super::LibraryImportPolicy::CopyExternalFiles,
+        )
+        .expect("prepare import");
+
+    let result = run_library_import_task(task).expect("the refused files are reported");
+
+    assert_eq!(
+        result.failures,
+        vec![
+            super::ImportFailure {
+                path: inside_path.clone(),
+                reason: super::ImportFailureReason::NotRecordedReference,
+            },
+            super::ImportFailure {
+                path: outside_path.clone(),
+                reason: super::ImportFailureReason::NotRecorded,
+            },
+        ]
+    );
+
+    assert_eq!(
+        result.summary,
+        super::LibraryImportSummary {
+            discovered_files: 2,
+            failed_files: 2,
+            stopped_on_error: true,
+            ..super::LibraryImportSummary::default()
+        }
+    );
+
+    assert_eq!(store.operation_log(), vec!["save_tracks"]);
+    assert_eq!(store.save_tracks_calls(), 1);
+    assert_eq!(store.flush_durable_calls(), 0);
+    assert!(store.tracks().expect("store tracks").is_empty());
+
+    assert!(
+        !library_root
+            .join("Unknown Artist/Unknown Album/Track.flac")
+            .exists(),
+        "newly copied file is rolled back"
+    );
+
+    assert!(
+        !library_root.join("Unknown Artist").exists(),
+        "rollback removes newly created empty directories"
+    );
+
+    assert_eq!(
+        std::fs::read(&inside_path).expect("internal source remains intact"),
+        b"inside audio bytes"
+    );
+
+    assert_eq!(
+        std::fs::read(&outside_path).expect("external source remains intact"),
+        b"outside audio bytes"
+    );
+
+    assert_eq!(
+        runtime.settings().library.management_mode,
+        LibraryManagementMode::ReferenceFilesInPlace
+    );
+
+    std::fs::remove_dir_all(library_root).expect("remove library root");
+    std::fs::remove_dir_all(external_root).expect("remove external root");
+}
+
+#[test]
+fn copy_external_import_policy_prefers_internal_duplicate() {
+    let root = unique_test_directory();
+    let library_root = root.join("z-library");
+    let external_root = root.join("a-external");
+
+    std::fs::create_dir_all(&library_root).expect("create library root");
+    std::fs::create_dir_all(&external_root).expect("create external root");
+
+    let inside_path = library_root.join("inside.flac");
+    let outside_path = external_root.join("outside.flac");
+
+    let content = b"identical audio content";
+
+    std::fs::write(&inside_path, content).expect("write internal source");
+    std::fs::write(&outside_path, content).expect("write external source");
+
+    let store = Arc::new(SqliteLibraryStore::open_in_memory().expect("in-memory SQLite store"));
+
+    let mut runtime = ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(
+        UserSettings::with_library_path(Some(library_root.clone())),
+    )))
+    .expect("load settings")
+    .with_library_services(store.clone(), Arc::new(TestMetadataService))
+    .expect("library services initialize");
+
+    let task = runtime
+        .prepare_library_import_with_policy(
+            vec![outside_path.clone(), inside_path.clone()],
+            super::LibraryImportPolicy::CopyExternalFiles,
+        )
+        .expect("import starts");
+
+    let result = super::run_library_import_task(task).expect("import completes");
+
+    assert_eq!(result.summary.imported_tracks, 1);
+    assert_eq!(result.summary.duplicate_files, 1);
+    assert_eq!(result.summary.failed_files, 0);
+    assert!(result.failures.is_empty());
+
+    runtime.apply_library_import_result(result);
+
+    assert_eq!(runtime.library_tracks().len(), 1);
+
+    assert_eq!(
+        runtime.library_tracks()[0].location.relative_path.as_path(),
+        Path::new("inside.flac")
+    );
+
+    assert_eq!(
+        std::fs::read(&inside_path).expect("internal file preserved"),
+        content
+    );
+
+    assert_eq!(
+        std::fs::read(&outside_path).expect("external file preserved"),
+        content
+    );
+
+    assert_eq!(
+        std::fs::read_dir(&library_root)
+            .expect("read library directory")
+            .count(),
+        1
+    );
+
+    assert_eq!(store.tracks().expect("stored tracks").len(), 1);
+
+    std::fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn copy_external_import_policy_preserves_unmanaged_library() {
+    let library_root = unique_test_directory();
+    let external_root = unique_test_directory();
+
+    std::fs::create_dir_all(&library_root).expect("create library root");
+    std::fs::create_dir_all(&external_root).expect("create external root");
+
+    let outside_path = external_root.join("outside.flac");
+    let inside_path = library_root.join("inside.flac");
+
+    std::fs::write(&outside_path, b"outside bytes").expect("write external source");
+    std::fs::write(&inside_path, b"inside bytes").expect("write internal source");
+
+    let store = Arc::new(SqliteLibraryStore::open_in_memory().expect("in-memory SQLite store"));
+
+    let mut runtime = ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(
+        UserSettings::with_library_path(Some(library_root.clone())),
+    )))
+    .expect("load settings")
+    .with_library_services(store.clone(), Arc::new(TestMetadataService))
+    .expect("library services initialize");
+
+    let task = runtime
+        .prepare_library_import_with_policy(
+            vec![outside_path.clone(), inside_path.clone()],
+            super::LibraryImportPolicy::CopyExternalFiles,
+        )
+        .expect("import starts");
+
+    let result = super::run_library_import_task(task).expect("import completes");
+
+    assert_eq!(result.summary.imported_tracks, 2);
+    assert_eq!(result.summary.failed_files, 0);
+    assert_eq!(result.summary.duplicate_files, 0);
+    assert!(result.failures.is_empty());
+
+    let expected_destination = library_root
+        .join("Unknown Artist")
+        .join("Unknown Album")
+        .join("Track.flac");
+
+    assert_eq!(
+        std::fs::read(&expected_destination).expect("external file copied"),
+        b"outside bytes"
+    );
+
+    assert_eq!(
+        std::fs::read(&outside_path).expect("external source preserved"),
+        b"outside bytes"
+    );
+
+    assert_eq!(
+        std::fs::read(&inside_path).expect("internal source preserved"),
+        b"inside bytes"
+    );
+
+    runtime.apply_library_import_result(result);
+
+    assert_eq!(runtime.library_tracks().len(), 2);
+
+    assert!(
+        runtime
+            .library_tracks()
+            .iter()
+            .any(|track| { track.location.relative_path.as_path() == Path::new("inside.flac") })
+    );
+
+    assert_eq!(
+        runtime.settings().library.management_mode,
+        LibraryManagementMode::ReferenceFilesInPlace
+    );
+
+    assert_eq!(store.tracks().expect("stored tracks").len(), 2);
+
+    std::fs::remove_dir_all(library_root).expect("remove library root");
+    std::fs::remove_dir_all(external_root).expect("remove external root");
+}
+
+#[test]
 fn unmanaged_external_import_indexes_library_files_in_place() {
     let library_root = unique_test_directory();
     std::fs::create_dir_all(&library_root).expect("create library root");

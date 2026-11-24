@@ -21,8 +21,9 @@ use sustain_metadata::hash_file_content;
 
 use crate::{
     ApplicationRuntime, ApplicationRuntimeError, ApplicationRuntimeResult,
-    LibraryConsolidationResult, LibraryConsolidationTask, LibraryImportResult, LibraryImportTask,
-    NotificationCategory, NotificationSeverity, library_task::LibraryTaskKind, notifications,
+    LibraryConsolidationResult, LibraryConsolidationTask, LibraryImportPolicy, LibraryImportResult,
+    LibraryImportTask, NotificationCategory, NotificationSeverity, library_task::LibraryTaskKind,
+    notifications,
 };
 
 mod capabilities;
@@ -68,8 +69,17 @@ impl ApplicationRuntime {
         &mut self,
         paths: Vec<PathBuf>,
     ) -> ApplicationRuntimeResult<LibraryImportTask> {
+        self.prepare_library_import_with_policy(paths, LibraryImportPolicy::FollowLibrarySettings)
+    }
+
+    pub fn prepare_library_import_with_policy(
+        &mut self,
+        paths: Vec<PathBuf>,
+        policy: LibraryImportPolicy,
+    ) -> ApplicationRuntimeResult<LibraryImportTask> {
         self.ensure_no_conflicting_library_mutation()?;
-        if self.settings.library.management_mode == LibraryManagementMode::CopyAddedFilesIntoLibrary
+        if self.settings.library.management_mode
+            == LibraryManagementMode::CopyAddedFilesIntoLibrary
         {
             self.ensure_managed_library_filesystem_supported()?;
         }
@@ -93,6 +103,7 @@ impl ApplicationRuntime {
 
         Ok(LibraryImportTask {
             paths,
+            policy,
             settings: self.settings.clone(),
             existing_tracks: self.library_tracks.clone(),
             library_store,

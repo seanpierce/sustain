@@ -27,8 +27,8 @@ use sustain_metadata::{InitialTags, hash_file_content, is_audio_name_for};
 
 use crate::{
     ApplicationRuntimeError, ApplicationRuntimeResult, ImportFailure, ImportFailureReason,
-    LibraryImportProgress, LibraryImportResult, LibraryImportSummary, LibraryImportTask,
-    library_scan,
+    LibraryImportPolicy, LibraryImportProgress, LibraryImportResult, LibraryImportSummary,
+    LibraryImportTask, library_scan,
 };
 
 use super::{
@@ -47,6 +47,7 @@ struct ManagedImportState {
     imported_tracks: Vec<Track>,
     pending_tracks: Vec<Track>,
     pending_copies: Vec<PendingCopy>,
+    pending_references: Vec<PathBuf>,
     duplicate_files: usize,
     /// Files left out, each with its reason: those skipped one by one as
     /// the import carried on, and those of a chunk the library refused.
@@ -65,6 +66,14 @@ impl ManagedImportState {
     /// source file as left out, and whether its copy is gone again.
     fn roll_back_pending_copies(&mut self, library_path: &Path) {
         self.pending_tracks.clear();
+
+        for path in std::mem::take(&mut self.pending_references) {
+            self.failures.push(ImportFailure {
+                path,
+                reason: ImportFailureReason::NotRecordedReference,
+            });
+        }
+
         let pending_copies = std::mem::take(&mut self.pending_copies);
         for pending in &pending_copies {
             let removed = pending.copy.remove().is_ok();
@@ -104,6 +113,7 @@ pub fn run_library_import_task_with_progress(
     mut progress: impl FnMut(LibraryImportProgress),
 ) -> ApplicationRuntimeResult<LibraryImportResult> {
     let mut context = LibraryImportContext {
+        policy: task.policy,
         settings: task.settings,
         existing_tracks: task.existing_tracks,
         library_store: task.library_store,
@@ -117,6 +127,7 @@ pub fn run_library_import_task_with_progress(
 }
 
 struct LibraryImportContext<'a> {
+    policy: LibraryImportPolicy,
     settings: sustain_domain::UserSettings,
     existing_tracks: Vec<Track>,
     library_store: std::sync::Arc<dyn sustain_library_store::LibraryStore>,
@@ -139,13 +150,18 @@ impl LibraryImportContext<'_> {
             });
         }
 
-        match self.settings.library.management_mode {
-            sustain_domain::LibraryManagementMode::ReferenceFilesInPlace => {
-                self.add_referenced_external_library_items(paths)
-            }
-            sustain_domain::LibraryManagementMode::CopyAddedFilesIntoLibrary => {
+        match (self.policy, self.settings.library.management_mode) {
+            (
+                LibraryImportPolicy::FollowLibrarySettings,
+                sustain_domain::LibraryManagementMode::ReferenceFilesInPlace,
+            ) => self.add_referenced_external_library_items(paths),
+            (_, sustain_domain::LibraryManagementMode::CopyAddedFilesIntoLibrary) => {
                 self.add_managed_external_library_items(paths)
             }
+            (
+                LibraryImportPolicy::CopyExternalFiles,
+                sustain_domain::LibraryManagementMode::ReferenceFilesInPlace,
+            ) => self.add_managed_external_library_items(paths),
         }
     }
 
@@ -166,7 +182,10 @@ impl LibraryImportContext<'_> {
             .validate(&library_path)
             .map_err(ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported)?;
 
-        let DiscoveredFiles { files, failures } = collect_supported_audio_files(
+        let DiscoveredFiles {
+            mut files,
+            failures,
+        } = collect_supported_audio_files(
             paths,
             &library_path,
             &HashSet::new(),
@@ -185,6 +204,26 @@ impl LibraryImportContext<'_> {
             ));
         }
 
+        let preserve_internal_paths = self.policy == LibraryImportPolicy::CopyExternalFiles
+            && self.settings.library.management_mode
+                == sustain_domain::LibraryManagementMode::ReferenceFilesInPlace;
+
+        let canonical_library_path = fs::canonicalize(&library_path)
+            .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
+
+        if preserve_internal_paths {
+            files.sort_by_cached_key(|file| {
+                !resolve_reference_locations(file, [&library_path, &canonical_library_path])
+                    .is_ok_and(|(_, locations)| !locations.is_empty())
+            });
+        }
+
+        let mut seen_locations = self
+            .existing_tracks
+            .iter()
+            .map(|track| track.location.relative_path.clone())
+            .collect::<BTreeSet<_>>();
+
         let mut batch = ManagedImportBatch::new(&self.existing_tracks, library_path);
         let mut next_track_id = library_scan::next_track_id(&self.existing_tracks)?;
 
@@ -197,6 +236,72 @@ impl LibraryImportContext<'_> {
                     state,
                 );
             }
+
+            if preserve_internal_paths {
+                match self.reference_file(
+                    file,
+                    [&batch.library_path, &canonical_library_path],
+                    &mut seen_locations,
+                ) {
+                    Ok(None) => {
+                        state.duplicate_files += 1;
+                        self.report_progress(index + 1, total_files);
+                        continue;
+                    }
+                    Err(ImportFailureReason::OutsideLibraryFolder) => {
+                        // External files fall through to the existing
+                        // managed copy pipeline below.
+                    }
+                    Err(reason) => {
+                        state.failures.push(ImportFailure {
+                            path: source_path.to_path_buf(),
+                            reason,
+                        });
+                        self.report_progress(index + 1, total_files);
+                        continue;
+                    }
+                    Ok(Some((relative_path, tags, file_size_bytes))) => {
+                        let Some(track_id) = sustain_domain::TrackId::new(next_track_id) else {
+                            return self.finish_failed_managed_import(
+                                &batch.library_path,
+                                total_files,
+                                state,
+                                ApplicationRuntimeError::LibraryStoreFailed,
+                            );
+                        };
+
+                        next_track_id += 1;
+                        batch.occupied_paths.insert(relative_path.clone());
+
+                        let referenced_path = relative_path.resolve(&batch.library_path);
+                        batch.content_index.add_referenced_file(&referenced_path);
+
+                        state.pending_references.push(source_path.to_path_buf());
+
+                        state.pending_tracks.push(Track {
+                            id: track_id,
+                            location: TrackLocation::available(relative_path),
+                            metadata: tags.metadata,
+                            rating: tags.rating,
+                            statistics: PlayStatistics::added_at(SystemTime::now()),
+                            file_size_bytes,
+                            has_embedded_artwork: Some(tags.has_embedded_artwork),
+                            file_modified_at: None,
+                        });
+
+                        if state.pending_tracks.len() >= MANAGED_IMPORT_COMMIT_CHUNK_SIZE
+                            && let Err(error) =
+                                self.commit_managed_import_chunk(&batch.library_path, &mut state)
+                        {
+                            return stop_after_commit_error(total_files, state, error);
+                        }
+
+                        self.report_progress(index + 1, total_files);
+                        continue;
+                    }
+                }
+            }
+
             match batch.import_file(self.metadata_service.as_ref(), source_path) {
                 Err(reason) => state.failures.push(ImportFailure {
                     path: source_path.to_path_buf(),
@@ -285,6 +390,8 @@ impl LibraryImportContext<'_> {
         let flush_result = self.library_store.flush_durable();
         state.imported_tracks.append(&mut state.pending_tracks);
         state.pending_copies.clear();
+        state.pending_references.clear();
+
         if flush_result.is_err() {
             return Err(ManagedImportCommitError::FlushFailed);
         }
@@ -448,26 +555,8 @@ impl LibraryImportContext<'_> {
         Option<(sustain_domain::TrackRelativePath, InitialTags, Option<u64>)>,
         ImportFailureReason,
     > {
-        let [library_path, canonical_library_path] = library_paths;
-        // Where the file is, by every name: two names for one file may
-        // resolve apart, a link to one of its hard links in the library.
-        let resolved: Vec<PathBuf> = file
-            .names
-            .iter()
-            .filter_map(|name| sustain_metadata::resolve_track_file(name).ok().flatten())
-            .collect();
-        let Some(file_path) = resolved.first() else {
-            return Err(ImportFailureReason::Unreadable);
-        };
-        let where_it_is = resolved
-            .iter()
-            .filter_map(|path| reference_relative_path_for_source(path, canonical_library_path));
-        let as_named = file.names.iter().filter_map(|name| {
-            [library_path, canonical_library_path]
-                .into_iter()
-                .find_map(|library_path| reference_relative_path_for_source(name, library_path))
-        });
-        let locations: Vec<_> = where_it_is.chain(as_named).collect();
+        let library_path = library_paths[0];
+        let (file_path, locations) = resolve_reference_locations(file, library_paths)?;
         let Some(relative_path) = locations.first().cloned() else {
             return Err(ImportFailureReason::OutsideLibraryFolder);
         };
@@ -484,9 +573,43 @@ impl LibraryImportContext<'_> {
             .metadata_service
             .read_initial_tags(&tag_source)
             .map_err(|_| ImportFailureReason::UnreadableTags)?;
-        let file_size_bytes = fs::metadata(file_path).map(|metadata| metadata.len()).ok();
+        let file_size_bytes = fs::metadata(&file_path).map(|metadata| metadata.len()).ok();
         Ok(Some((relative_path, tags, file_size_bytes)))
     }
+}
+
+/// Resolves a discovered file and determines the library-relative
+/// locations under which it can be referenced.
+fn resolve_reference_locations(
+    file: &DiscoveredFile,
+    library_paths: [&Path; 2],
+) -> Result<(PathBuf, Vec<sustain_domain::TrackRelativePath>), ImportFailureReason> {
+    let [library_path, canonical_library_path] = library_paths;
+
+    // A file may be reached through multiple names or links.
+    let resolved: Vec<PathBuf> = file
+        .names
+        .iter()
+        .filter_map(|name| sustain_metadata::resolve_track_file(name).ok().flatten())
+        .collect();
+
+    let Some(file_path) = resolved.first().cloned() else {
+        return Err(ImportFailureReason::Unreadable);
+    };
+
+    let where_it_is = resolved
+        .iter()
+        .filter_map(|path| reference_relative_path_for_source(path, canonical_library_path));
+
+    let as_named = file.names.iter().filter_map(|name| {
+        [library_path, canonical_library_path]
+            .into_iter()
+            .find_map(|library_path| reference_relative_path_for_source(name, library_path))
+    });
+
+    let locations = where_it_is.chain(as_named).collect();
+
+    Ok((file_path, locations))
 }
 
 enum ManagedImportCommitError {
@@ -753,6 +876,24 @@ impl LibraryContentIndex {
         Self {
             paths_by_size,
             hashes: HashMap::new(),
+        }
+    }
+
+    /// Adds a newly referenced library file to the content index.
+    fn add_referenced_file(&mut self, path: &Path) {
+        let Ok(Some(resolved)) = sustain_metadata::resolve_track_file(path) else {
+            return;
+        };
+
+        let Ok(metadata) = fs::metadata(&resolved) else {
+            return;
+        };
+
+        if metadata.is_file() {
+            self.paths_by_size
+                .entry(metadata.len())
+                .or_default()
+                .push(resolved);
         }
     }
 

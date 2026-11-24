@@ -6,7 +6,9 @@ use std::{path::PathBuf, rc::Rc, sync::mpsc, time::Duration};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{gdk, gio};
-use sustain_app_runtime::{NotificationCategory, NotificationSeverity, runtime_error_text};
+use sustain_app_runtime::{
+    LibraryImportPolicy, NotificationCategory, NotificationSeverity, runtime_error_text,
+};
 
 use super::{
     ApplicationRuntimeError, LibraryImportProgress, LibraryImportResult, LibraryImportTask,
@@ -58,18 +60,20 @@ fn prepare_library_import(
     paths: Vec<PathBuf>,
 ) -> Result<LibraryImportTask, ApplicationRuntimeError> {
     let mut runtime = runtime.borrow_mut();
-    runtime.prepare_library_import(paths).inspect_err(|error| {
-        if !matches!(
-            error,
-            ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported(_)
-        ) {
-            runtime.push_ephemeral_notification(
-                NotificationCategory::LibraryImport,
-                NotificationSeverity::Error,
-                runtime_error_text(error),
-            );
-        }
-    })
+    runtime
+        .prepare_library_import_with_policy(paths, LibraryImportPolicy::CopyExternalFiles)
+        .inspect_err(|error| {
+            if !matches!(
+                error,
+                ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported(_)
+            ) {
+                runtime.push_ephemeral_notification(
+                    NotificationCategory::LibraryImport,
+                    NotificationSeverity::Error,
+                    runtime_error_text(error),
+                );
+            }
+        })
 }
 
 pub(crate) fn install_file_drop_target(
