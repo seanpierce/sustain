@@ -178,9 +178,17 @@ impl LibraryImportContext<'_> {
             .library_path()
             .ok_or(ApplicationRuntimeError::LibraryPathUnavailable)?
             .to_path_buf();
-        self.managed_library_filesystem_validator
-            .validate(&library_path)
-            .map_err(ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported)?;
+
+        let preserve_internal_paths = self.policy
+            == LibraryImportPolicy::CopyExternalFiles
+            && self.settings.library.management_mode
+                == sustain_domain::LibraryManagementMode::ReferenceFilesInPlace;
+
+        if !preserve_internal_paths {
+            self.managed_library_filesystem_validator
+                .validate(&library_path)
+                .map_err(ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported)?;
+        }
 
         let DiscoveredFiles {
             mut files,
@@ -204,16 +212,30 @@ impl LibraryImportContext<'_> {
             ));
         }
 
-        let preserve_internal_paths = self.policy == LibraryImportPolicy::CopyExternalFiles
-            && self.settings.library.management_mode
-                == sustain_domain::LibraryManagementMode::ReferenceFilesInPlace;
-
         let canonical_library_path = fs::canonicalize(&library_path)
             .map_err(|_| ApplicationRuntimeError::LibraryImportFailed)?;
 
         if preserve_internal_paths {
+            let library_paths = [
+                library_path.as_path(),
+                canonical_library_path.as_path(),
+            ];
+
+            let contains_external_files = files.iter().any(|file| {
+                resolve_reference_locations(file, library_paths)
+                    .is_ok_and(|(_, locations)| locations.is_empty())
+            });
+
+            if contains_external_files {
+                self.managed_library_filesystem_validator
+                    .validate(&library_path)
+                    .map_err(
+                        ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported,
+                    )?;
+            }
+
             files.sort_by_cached_key(|file| {
-                !resolve_reference_locations(file, [&library_path, &canonical_library_path])
+                !resolve_reference_locations(file, library_paths)
                     .is_ok_and(|(_, locations)| !locations.is_empty())
             });
         }
