@@ -502,18 +502,6 @@ pub(crate) fn build_main_window(
     playlists_view.set_vexpand(true);
     playlists_view.append(playlists_header.widget());
     playlists_view.append(&playlists_table.widget());
-    // TODO: Replace
-    // let songs_drop_indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    // songs_drop_indicator.add_css_class(LIBRARY_DROP_INDICATOR_CLASS);
-    // songs_drop_indicator.set_can_target(false);
-    // songs_drop_indicator.set_hexpand(true);
-    // songs_drop_indicator.set_vexpand(true);
-
-    // let songs_drop_overlay = gtk::Overlay::new();
-    // songs_drop_overlay.set_hexpand(true);
-    // songs_drop_overlay.set_vexpand(true);
-    // songs_drop_overlay.set_child(Some(&songs_table.widget()));
-    // songs_drop_overlay.add_overlay(&songs_drop_indicator);
 
     let device_panel = DeviceSyncPanel::new(runtime.clone(), command_controller.clone());
     window.connect_is_active_notify({
