@@ -50,14 +50,11 @@ pub(crate) fn install(app: &gtk::Application) {
             gio::DBusCallFlags::NONE,
             1500,
             None::<&gio::Cancellable>,
-        ) {
-            if let Some(outer) = reply.child_value(0).as_variant() {
-                if let Some(inner) = outer.as_variant() {
-                    if let Some(theme) = inner.str() {
-                        apply_theme(theme);
-                    }
-                }
-            }
+        ) && let Some(outer) = reply.child_value(0).as_variant()
+            && let Some(inner) = outer.as_variant()
+            && let Some(theme) = inner.str()
+        {
+            apply_theme(theme);
         }
 
         // Receive changes while the application is running.
@@ -73,10 +70,10 @@ pub(crate) fn install(app: &gtk::Application) {
                 return;
             }
 
-            if let Some(value) = parameters.child_value(2).as_variant() {
-                if let Some(theme) = value.str() {
-                    apply_theme(theme);
-                }
+            if let Some(value) = parameters.child_value(2).as_variant()
+                && let Some(theme) = value.str()
+            {
+                apply_theme(theme);
             }
         });
 
