@@ -1834,6 +1834,140 @@ fn managed_import_takes_no_link_named_unlike_its_target_for_the_track_already_th
 }
 
 #[test]
+fn copy_external_import_policy_allows_internal_files_without_managed_filesystem() {
+    let library_root = unique_test_directory();
+
+    std::fs::create_dir_all(&library_root).expect("create library root");
+
+    let inside_path = library_root.join("inside.flac");
+
+    std::fs::write(&inside_path, b"inside audio bytes").expect("write internal source");
+
+    let store = Arc::new(SqliteLibraryStore::open_in_memory().expect("in-memory SQLite store"));
+
+    let validator = ManagedLibraryFilesystemValidator::fail_after(
+        0,
+        ManagedLibraryFilesystemError::HardLinkFailed,
+    );
+
+    let mut runtime = ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(
+        UserSettings::with_library_path(Some(library_root.clone())),
+    )))
+    .expect("load settings")
+    .with_managed_library_filesystem_validator(validator)
+    .with_library_services(store.clone(), Arc::new(TestMetadataService))
+    .expect("library services initialize");
+
+    let task = runtime
+        .prepare_library_import_with_policy(
+            vec![inside_path.clone()],
+            super::LibraryImportPolicy::CopyExternalFiles,
+        )
+        .expect("prepare internal import");
+
+    let result =
+        run_library_import_task(task).expect("internal import does not require managed validation");
+
+    assert_eq!(result.summary.imported_tracks, 1);
+    assert_eq!(result.summary.failed_files, 0);
+    assert!(result.failures.is_empty());
+
+    runtime.apply_library_import_result(result);
+
+    assert_eq!(runtime.library_tracks().len(), 1);
+
+    assert_eq!(
+        runtime.library_tracks()[0].location.relative_path.as_path(),
+        Path::new("inside.flac")
+    );
+
+    assert_eq!(
+        std::fs::read(&inside_path).expect("internal source preserved"),
+        b"inside audio bytes"
+    );
+
+    assert_eq!(store.tracks().expect("stored tracks").len(), 1);
+
+    std::fs::remove_dir_all(library_root).expect("remove library root");
+}
+
+#[test]
+fn copy_external_import_policy_rejects_unsupported_managed_filesystem() {
+    let library_root = unique_test_directory();
+    let external_root = unique_test_directory();
+
+    std::fs::create_dir_all(&library_root).expect("create library root");
+    std::fs::create_dir_all(&external_root).expect("create external root");
+
+    let inside_path = library_root.join("inside.flac");
+    let outside_path = external_root.join("outside.flac");
+
+    std::fs::write(&inside_path, b"inside audio bytes").expect("write internal source");
+    std::fs::write(&outside_path, b"outside audio bytes").expect("write external source");
+
+    let store = Arc::new(SqliteLibraryStore::open_in_memory().expect("in-memory SQLite store"));
+
+    let validator = ManagedLibraryFilesystemValidator::fail_after(
+        0,
+        ManagedLibraryFilesystemError::HardLinkFailed,
+    );
+
+    let mut runtime = ApplicationRuntime::with_settings_store(Box::new(TestSettingsStore::new(
+        UserSettings::with_library_path(Some(library_root.clone())),
+    )))
+    .expect("load settings")
+    .with_managed_library_filesystem_validator(validator)
+    .with_library_services(store.clone(), Arc::new(TestMetadataService))
+    .expect("library services initialize");
+
+    let task = runtime
+        .prepare_library_import_with_policy(
+            vec![inside_path.clone(), outside_path.clone()],
+            super::LibraryImportPolicy::CopyExternalFiles,
+        )
+        .expect("preparation defers filesystem validation");
+
+    let error = run_library_import_task(task).expect_err("worker rejects unsupported filesystem");
+
+    assert_eq!(
+        error,
+        ApplicationRuntimeError::ManagedLibraryFilesystemUnsupported(
+            ManagedLibraryFilesystemError::HardLinkFailed
+        )
+    );
+
+    runtime.fail_library_import(error);
+
+    assert!(runtime.library_tracks().is_empty());
+    assert!(store.tracks().expect("stored tracks").is_empty());
+
+    assert_eq!(
+        std::fs::read(&inside_path).expect("internal source preserved"),
+        b"inside audio bytes"
+    );
+
+    assert_eq!(
+        std::fs::read(&outside_path).expect("external source preserved"),
+        b"outside audio bytes"
+    );
+
+    assert_eq!(
+        std::fs::read_dir(&library_root)
+            .expect("read library directory")
+            .count(),
+        1
+    );
+
+    assert_eq!(
+        runtime.notifications().persistent_stack()[0].category,
+        NotificationCategory::ManagedLibraryFilesystem
+    );
+
+    std::fs::remove_dir_all(library_root).expect("remove library root");
+    std::fs::remove_dir_all(external_root).expect("remove external root");
+}
+
+#[test]
 fn copy_external_import_policy_rolls_back_only_copied_files() {
     let library_root = unique_test_directory();
     let external_root = unique_test_directory();
