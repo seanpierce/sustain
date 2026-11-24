@@ -80,39 +80,46 @@ unmounted drive are not reported missing. Edits and tag repairs to a
 linked track write the file the link points to; the link itself stays.
 
 ### Drag-and-drop import — *iso-iTunes*
-Dragging files or folders from Files (or any GNOME-compatible source) onto
-the Music view imports them into the library. Folders are walked
-recursively for supported audio formats. The drop zone shows an active
-state while a drag is hovered.
+Dragging files or folders from Files (or any compatible file manager)
+onto the Songs, Albums, or Playlists view imports them into the library.
+Folders are walked recursively for supported audio formats. A shared
+drop zone shows an active state while a drag is hovered.
 
-Behavior follows the active library mode:
+External files are copied into the library regardless of the active
+library organization mode:
 
-- **Keep my library organized** — files are copied into the managed
-  `Artist/Album/NN Title.ext` layout, skipping any file byte-identical to
-  one already in the library, so re-dropping an unchanged file doesn't
-  ingest it twice. The comparison covers the whole file, tags included: a
-  copy whose tags differ (for example, after editing the managed copy's
-  metadata) is imported again.
-- **Don't touch my files** — files are indexed in place. A file that
-  lives outside the configured library folder is left out, since
-  reference mode never moves or copies, unless the library folder links
-  to it; it is then indexed under the linked name, as a scan would.
+- **Keep my library organized** — imports follow the managed
+  `Artist/Album/NN Title.ext` layout.
+- **Don't touch my files** — external files are copied into the managed
+  directory layout, while files already within the configured library
+  are indexed in place without being moved or renamed.
 
-Dropped links are followed in both modes, under the same extension rule
-as a scan; in **Keep my library organized** mode the file a link points to is
-what gets copied in.
+Importing external files does not enable managed library organization
+or reorganize existing tracks. Original source files are preserved.
+
+Copied files are checked against existing library content to prevent
+byte-identical duplicates. The comparison covers the whole file, tags
+included: a copy whose tags differ may be imported again.
+
+Dropped links are followed under the same extension rule as a scan.
+External copies use the contents of the file the link points to.
+
+Imports requiring managed copies validate the destination filesystem
+before copying. Imports that only reference existing files in unmanaged
+mode do not require managed filesystem capabilities.
 
 Drops while another library task (scan, import, or organize) is running
 are rejected by the runtime rather than racing. Managed copies report
-completed/total progress in the status bar. Cancelling keeps files that have
-already finished copying and records those completed tracks in the library.
+completed/total progress in the status bar. Cancelling keeps files that
+have already finished copying and records those completed tracks in
+the library.
 
-An import skips a file it cannot bring in (unreadable, tags it cannot read,
-a copy that fails, outside the library folder in reference mode) and carries
-on with the rest; only a failure of the library itself, such as its database
-refusing a write, stops it. At the end, the status bar counts the files left
-out, and a window lists each one with its folder and the reason, so they can
-be found and fixed. *Sustain-native*
+An import skips a file it cannot bring in (unreadable, tags it cannot
+read, or a copy that fails) and carries on with the rest; a failure of
+the library itself, such as its database refusing a write, stops it.
+At the end, the status bar counts the files left out, and a window lists
+each one with its folder and the reason, so they can be found and fixed.
+*Sustain-native*
 
 ### Hard-link move primitive — *Sustain-native*
 Managed-mode organization uses a same-filesystem metadata move: retain an
@@ -144,10 +151,14 @@ Opus, the MP4 family (`.m4a`, `.m4b`, `.mp4`), WAV (`.wav`), and AIFF
 (`.aif`, `.aiff`, and AIFF-C `.aifc`). Files with other extensions are
 skipped silently during library walks.
 
-### Duplicate detection on managed import — *iTunes-adjacent*
-When adding external files in managed mode, Sustain skips files whose
+### Duplicate detection on copied imports — *iTunes-adjacent*
+When copying external files into the library, Sustain skips files whose
 bytes are identical to a file already in the library (a whole-file hash,
 with file size as a cheap pre-filter); nothing about the hash is stored.
+
+This applies to copied drag-and-drop imports regardless of the active
+library organization mode.
+
 A track's identity in the library is its relative path, not its content.
 Plain in-place scans do **not** hash file contents.
 
