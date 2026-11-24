@@ -534,7 +534,7 @@ pub(crate) fn build_main_window(
     );
     let statistics_view = StatisticsView::new(runtime.clone());
     let content_stack = ContentStack::new(
-        &songs_drop_overlay,
+        &songs_table.widget(),
         &albums_view.widget(),
         &duplicates_view.widget(),
         &statistics_view.widget(),
@@ -800,8 +800,27 @@ pub(crate) fn build_main_window(
     sidebar.set_online_busy_query(sidebar_online_busy_query(&runtime));
     let scan_requested = library_scan_requested_callback(&runtime);
     install_cd_import_requested(&cd_import_panel, &sidebar, &runtime, &playback_changed);
+
+    let library_drop_indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    library_drop_indicator.add_css_class(LIBRARY_DROP_INDICATOR_CLASS);
+    library_drop_indicator.set_can_target(false);
+    library_drop_indicator.set_hexpand(true);
+    library_drop_indicator.set_vexpand(true);
+
+    let library_drop_overlay = gtk::Overlay::new();
+    library_drop_overlay.set_hexpand(true);
+    library_drop_overlay.set_vexpand(true);
+    library_drop_overlay.set_child(Some(content_stack.widget()));
+    library_drop_overlay.add_overlay(&library_drop_indicator);
+
     let import_requested = library_import_requested_callback(&runtime, window.upcast_ref());
-    install_file_drop_target(&songs_drop_overlay, &songs_drop_indicator, import_requested);
+
+    install_file_drop_target(
+        &library_drop_overlay,
+        &library_drop_indicator,
+        import_requested,
+    );
+
     // Re-applies the Views toggles to the live UI the instant they
     // change: the sidebar's Duplicates/Statistics rows and the Now
     // Playing waveform.
@@ -864,7 +883,7 @@ pub(crate) fn build_main_window(
         preferences_hooks,
     );
 
-    main_content.append(content_stack.widget());
+    main_content.append(&library_drop_overlay);
 
     // gtk::Paned keeps drag-resize between SIDEBAR_MIN_WIDTH and
     // SIDEBAR_MAX_WIDTH, with the user's manually-set width preserved
